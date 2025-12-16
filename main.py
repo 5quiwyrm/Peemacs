@@ -5,31 +5,36 @@ import copy
 from common import *
 import sys
 
-debug = False
-
 def main(w):
-    global debug
     w.clear()
     w.refresh()
     filename = sys.argv[1]
     with open(filename, "r") as f:
-        win = Window(f.read().splitlines(), filename)
+        state = State(f.read().splitlines(), filename)
     import init
-    init.init(win)
+    init.init(state)
 
     ch = None
     while True:
-        # TODO: support A-<key> combos: https://stackoverflow.com/questions/22362076/how-to-detect-curses-alt-key-combinations-in-python
         w.clear()
-        if debug:
-            w.addstr(c.LINES - 1, 0, f"key: {repr(str(ch))}, type: {type(ch)}")
-        win.display(w)
-        ch = None
+        state.display(w)
+        key = None
         try:
-            ch = w.getkey()
+            ch = w.getch()
+            if ch == 27: # ALT
+                w.nodelay(True)
+                chh = ""
+                try:
+                    chh = w.getkey()
+                except:
+                    break # something has gone very wrong
+                w.nodelay(False)
+                key = "a-" + chh
+            else:
+                key = (c.keyname(ch)).decode("utf-8")
         except:
             pass
-        win.process_key(ch)
+        state.process_key(key)
         w.refresh()
 
 c.wrapper(main)
