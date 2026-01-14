@@ -9,8 +9,18 @@ def main(w):
     w.clear()
     w.refresh()
     filename = sys.argv[1]
-    with open(filename, "r") as f:
-        state = State(f.read().splitlines(), filename)
+    import os
+    if os.path.exists(filename):
+        if not os.path.isdir(filename):
+            with open(filename, "r") as f:
+                state = State(f.read().splitlines(), filename)
+        else:
+            raise Exception("You can't open a dir")
+    else:
+        with open(filename, "x") as f:
+            f.write("\n")
+            state = State([""], filename)
+        
     import init
     init.init(state)
 
@@ -34,6 +44,8 @@ def main(w):
                 key = (c.keyname(ch)).decode("utf-8")
         except:
             pass
+        if key == ctrlise('z'):
+            break
         state.process_key(key)
         w.refresh()
 

@@ -29,11 +29,11 @@ class Window:
     def __init__(self, lines, filename):
         self.lines = lines
         self.filename = filename
-        self._col = 0
         self._line = 0
         self.cursor = Cursor()
         self.key_bindings = {}
         self.vars = {}
+        self.mark_range = None # [lb_line, lb_col, ub_line, ub_col], inclusive
 
 class Cursor:
     def __init__(self):

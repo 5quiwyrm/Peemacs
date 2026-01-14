@@ -3,9 +3,9 @@ import curses as c
 from templates import *
 import copy
 import glob
+import re
 
 def init(state):
-    # TODO: by popular demand (one person), a vim mode should be implemented as an alterative, init_vim.py
     win = state.win()
     win.key_bindings["KEY_UP"] = move_up
     win.key_bindings["KEY_DOWN"] = move_down
@@ -16,9 +16,9 @@ def init(state):
     win.key_bindings["^J"] = type_enter
     win.key_bindings[ctrlise('w')] = save_file
     win.key_bindings["^I"] = tab
+    win.key_bindings["KEY_BTAB"] = btab
     win.key_bindings[ctrlise('e')] = end
     win.key_bindings[ctrlise('a')] = home
-    win.key_bindings[ctrlise('r')] = reload_editor
     win.key_bindings[ctrlise('d')] = page_down
     win.key_bindings[ctrlise('u')] = page_up
     win.key_bindings[ctrlise('x')] = ctrlx
@@ -26,17 +26,44 @@ def init(state):
     win.key_bindings[ctrlise('g')] = repeat_cmd
     win.key_bindings[ctrlise('f')] = next_word
     win.key_bindings[ctrlise('b')] = prev_word
+    win.key_bindings[ctrlise('r')] = make_range
     state.process_key = lambda s: process_key(state, s)
     state.display = lambda w: display(state, w)
     win.vars["message"] = ""
     win.vars["ctrlx"] = False
     win.vars["ctrlx_answer"] = ""
 
-def noop(a, _):
+def make_range(win, _):
+    c.beep()
+    if "mark_range" not in win.vars:
+        win.vars["mark_range"] = None
+    if win.vars["mark_range"] == None:
+        win.vars["mark_range"] = []
+    if len(win.vars["mark_range"]) == 4:
+        win.vars["mark_range"] = []
+    else:
+        win.vars["mark_range"] = win.vars["mark_range"] + [win.cursor.line, win.cursor.col]
+
+def noop(a, b):
     pass
 
+up_padding = 10
+down_padding = 10
+def normalise_cursor(win):
+    if win.cursor.line >= len(win.lines):
+        win.cursor.line = len(win.lines) - 1
+    if win.cursor.col > len(win.lines[win.cursor.line]):
+        win.cursor.col = len(win.lines[win.cursor.line])
+    
+    if win.cursor.line - up_padding < win._line:
+        win._line = max(0, win.cursor.line - up_padding)
+    if win.cursor.line + down_padding > win._line + c.LINES:
+        win._line = min(len(win.lines), win.cursor.line + down_padding - c.LINES)
+
+# TODO: refactor code to allow for custom colourings and mark range printing
 def display(state, w):
     win = state.win()
+    normalise_cursor(win)
     x = 0
     bottom_lines = 2
     if "message" not in win.vars:
@@ -47,14 +74,14 @@ def display(state, w):
         win.vars["ctrlx_answer"] = ""
     longest_number = len(str(len(win.lines) - 1))
     while x < c.LINES - bottom_lines and x + win._line < len(win.lines):
-        w.addnstr(x, 0, win.lines[x + win._line][win._col:], c.COLS)
+        w.addnstr(x, 0, win.lines[x + win._line], c.COLS)
         x += 1
         if x >= len(win.lines):
             break
     w.addnstr(c.LINES - 2, 0, statusline(state), c.COLS)
     if not win.vars["ctrlx"]:
         w.addnstr(c.LINES - 1, 0, win.vars["message"], c.COLS)
-        w.move(min(c.LINES - 1, win.cursor.line - win._line), min(c.COLS - 1, win.cursor.col - win._col))
+        w.move(min(c.LINES - 1, win.cursor.line - win._line), min(c.COLS - 1, win.cursor.col))
         win.vars["message"] = ""
     else:
         w.addnstr(c.LINES - 1, 0, ("^X: " + win.vars["ctrlx_answer"]), c.COLS)
@@ -62,7 +89,14 @@ def display(state, w):
 
 def statusline(state):
     win = state.win()
-    return f"[{state.windows_head}]: {win.filename}:{win.cursor.line}:{win.cursor.col}"
+    ruler = 80
+    ruler_violation = []
+    for (idx, line) in enumerate(win.lines):
+        if len(line.rstrip()) > ruler:
+            ruler_violation.append(idx)
+    if "mark_range" not in win.vars:
+        win.vars["mark_range"] = None
+    return f"[{state.windows_head}]: {win.filename}:{win.cursor.line}:{win.cursor.col} | mark: {win.vars['mark_range']} | ruler: {ruler_violation}"
 
 def process_key(state, key):
     win = state.win()
@@ -94,7 +128,6 @@ def process_key(state, key):
             except Exception as e:
                 win.vars["message"] = str(e)
         except:
-            win.vars["message"] = str(key) + " : " + str(type(key))
             if key.startswith("a-"):
                 pass 
             elif key == "~" or (key != None and ord(key[0]) >= 32):
@@ -115,10 +148,6 @@ up_padding = 10
 def move_up(win, _):
     if win.cursor.line != 0:
         win.cursor.line -= 1
-        if win.cursor.col > len(win.lines[win.cursor.line]):
-            win.cursor.col = len(win.lines[win.cursor.line])
-        if win.cursor.line - up_padding < win._line:
-            win._line = max(0, win.cursor.line - up_padding)
     else:
         c.beep()
 
@@ -126,10 +155,6 @@ down_padding = 10
 def move_down(win, _):
     if win.cursor.line < len(win.lines) - 1:
         win.cursor.line += 1
-        if win.cursor.col > len(win.lines[win.cursor.line]):
-            win.cursor.col = len(win.lines[win.cursor.line])
-        if win.cursor.line + down_padding > win._line + c.LINES:
-            win._line = min(len(win.lines), win.cursor.line + down_padding - c.LINES)
     else:
         c.beep()
 
@@ -161,18 +186,49 @@ def move_right(win, _):
 
 def type_enter(win, _):
     l = win.lines[win.cursor.line]
+    ident = ""
+    try: # this is a hack
+        if l == "":
+            raise
+        if l[-1] in ":{[(":
+            ident += "    "
+        for ch in l:
+            if ch == ' ':
+                ident += ' '
+            else:
+                raise
+    except:
+        pass
     win.lines[win.cursor.line] = l[:win.cursor.col]
-    win.lines.insert(win.cursor.line + 1, l[win.cursor.col:])
+    win.lines.insert(win.cursor.line + 1, ident + l[win.cursor.col:])
     win.cursor.line += 1
-    win.cursor.col = 0
+    win.cursor.col = len(ident)
 
 def save_file(win, _):
     with open(win.filename, "w") as f:
         written = f.write("\n".join(win.lines))
     win.vars["message"] = f"saved {len(win.lines)} lines, {written} bytes"
 
+@handles_range
 def tab(win, _):
-    type_key(win, "    ")
+    try:
+        lb_line, _, ub_line, _ = win.vars["mark_range"]
+        for i in range(lb_line, ub_line + 1):
+            win.lines[i] = "    " + win.lines[i]
+    except:
+        type_key(win, "    ")
+
+@handles_range
+def btab(win, _):
+    try:
+        lb_line, _, ub_line, _ = win.vars["mark_range"]
+        for i in range(lb_line, ub_line + 1):
+            win.lines[i] = win.lines[i].removeprefix("    ")
+    except:
+        l = win.lines[win.cursor.line]
+        win.lines[win.cursor.line] = win.lines[win.cursor.line].removeprefix("    ")
+        if l != win.lines[win.cursor.line]:
+            win.cursor.col = max(0, win.cursor.col - 4)
 
 def end(win, _):
     win.cursor.col = len(win.lines[win.cursor.line])
@@ -180,29 +236,23 @@ def end(win, _):
 def home(win, _):
     win.cursor.col = 0
 
-def reload_editor(win, _):
-    win = Window(win.lines, win.filename)
-    init(win)
-
 def page_down(win, _):
-    og = win.cursor.line
-    win.cursor.line = min(max(0, len(win.lines) - 1), win.cursor.line + c.LINES)
-    win.cursor.col = min(len(win.lines[win.cursor.line]), win.cursor.col)
-    win._line += win.cursor.line - og
+    win.cursor.line = min(len(win.lines) - 1, win.cursor.line + c.LINES)
 
 def page_up(win, _):
-    og = win.cursor.line
     win.cursor.line = max(0, win.cursor.line - c.LINES)
-    win.cursor.col = min(len(win.lines[win.cursor.line]), win.cursor.col)
-    win._line -= og - win.cursor.line
-    if win._line < 0:
-        win._line = 0
 
+@handles_range
 def del_line(win, _):
-    win.lines.pop(win.cursor.line)
+    try:
+        lb_line, _, ub_line, _ = win.vars["mark_range"]
+        win.lines = win.lines[:lb_line] + win.lines[ub_line + 1:]
+        win.cursor.line -= ub_line - lb_line
+        win.vars["mark_range"] = None
+    except:
+        win.lines.pop(win.cursor.line)
     win.cursor.col = 0
-    if win.cursor.line != 0:
-        win.cursor.line -= 1
+    win.cursor.line -= 1
 
 def next_word(win, _):
     while True:
@@ -247,25 +297,74 @@ def prev_word(win, _):
 def ctrlx(win, _):
     win.vars["ctrlx"] = True
 
-def repeat_cmd(win, _):
-    if isinstance(win, Window):
-        exec_command(win, win.vars["ctrlx_answer"])
+def repeat_cmd(state, _):
+    return exec_command(state, state.win().vars["ctrlx_answer"])
+
+def open_file_location(state, _):
+    win = state.win()
+    line = win.lines[win.cursor.line]
+    path, rest = line.split(":", 1)
+    line_num, rest = rest.split(" | ", 1)
+    open_file_raw(state, path.strip())
+    init(state)
+    try:
+        state.win().cursor.line = int(line_num)
+        state.win()._line = max(0, int(line_num) - up_padding)
+    except:
+        return "unreachable: bad line number"
+
+def open_file_raw(state, filename, create = False):
+    open_mode = "r"
+    if create:
+        open_mode = "a+"
+    with open(filename, open_mode) as f:
+        if create:
+            f.write("\n")
+        state.new_win(f.read().splitlines(), filename)
+        init(state)
+
+def basic_setup(win):
+    win.key_bindings["KEY_UP"] = move_up
+    win.key_bindings["KEY_DOWN"] = move_down
+    win.key_bindings["KEY_LEFT"] = move_left
+    win.key_bindings["KEY_RIGHT"] = move_right    
+    win.key_bindings["KEY_BACKSPACE"] = noop
+    win.key_bindings["KEY_RESIZE"] = noop
+    win.key_bindings[ctrlise('x')] = ctrlx
+    win.key_bindings[ctrlise('d')] = page_down
+    win.key_bindings[ctrlise('u')] = page_up
+    win.key_bindings[ctrlise('e')] = end
+    win.key_bindings[ctrlise('a')] = home
+    win.vars["message"] = ""
+    win.vars["ctrlx"] = False
+    win.vars["ctrlx_answer"] = ""
+
+def is_in_range(self, line, col):
+    try:
+        lb_line, lb_col, ub_line, ub_col = self.vars["mark_range"]
+    except:
+        return False
+    if isinstance(ub_col, list):
+        return False
+    
+    if line < lb_line:
+        return False
+    if line > ub_line:
+        return False
+
+    if line == lb_line:
+        return col >= lb_col
+    elif line == ub_line:
+        return col <= ub_col
     else:
-        return "not a window"
+        return True
 
 def exec_command(state, cmd):
     win = state.win()
     win.vars["ctrlx"] = False
 
     def open_file(filename, create = False):
-        open_mode = "r"
-        if create:
-            open_mode = "a+"
-        with open(filename, open_mode) as f:
-            if create:
-                f.write("\n")
-            state.new_win(f.read().splitlines(), filename)
-            init(state)
+        open_file_raw(state, filename, create = create)
 
     def goto_line(line):
         if line >= len(win.lines) or line < 0:
@@ -273,9 +372,10 @@ def exec_command(state, cmd):
             return "line out of range!"
         win.cursor.line = line
         win._line = max(0, line - up_padding)
+    gl = goto_line
 
     def create_file(filename):
-        with open(file, "a+") as f:
+        with open(filename, "a+") as f:
             f.write("\n")
             state.new_win([""], filename)
             init(state)
@@ -287,7 +387,7 @@ def exec_command(state, cmd):
                 win.cursor.col += 1 + f
                 return f"found on current line, col {f}"
         if win.cursor.line + 1 >= len(win.lines):
-            return "exhausted search, try bfind(pattern)"
+            return "exhausted search"
         for (i, l) in enumerate(win.lines[win.cursor.line + 1:]):
             f = l.find(pattern)
             if f != -1:
@@ -295,59 +395,28 @@ def exec_command(state, cmd):
                 win._line = min(max(0, len(win.lines) - down_padding), win.cursor.line - down_padding)
                 win.cursor.col = f
                 return f"found on line {win.cursor.line + i + 1}, col {f}"
-        return "exhausted search, try bfind(pattern)"
-
-    def bfind(pattern):
-        if win.cursor.col != 0:
-            f = win.lines[win.cursor.line][:win.cursor.col].find(pattern)
-            if f != -1:
-                win.cursor.col = f
-                return f"found on current line, col {f}"
-        if win.cursor.line == 0:
-            return "exhausted search, try find(pattern)"
-        for (i, l) in enumerate(win.lines[:win.cursor.line]):
-            f = l.find(pattern)
-            if f != -1:
-                win.cursor.line = l
-                win.cursor.col = f
-                win._line = max(0, l - up_padding)
-                return f"found on line {win.cursor.line}, col {f}"
-        return "exhausted search, try find(pattern)"
+        return "exhausted search"
 
     def ls(path = ".", pattern = "/**/*"):
         import os
         paths = glob.glob(path + pattern, recursive = True)
+        paths = list([f for f in paths if os.path.isfile(f)])
         state.new_win(paths, f"ls(path = {repr(path)}, pattern = {repr(pattern)})")
         win = state.win()
-        win.key_bindings["KEY_UP"] = move_up
-        win.key_bindings["KEY_DOWN"] = move_down
-        win.key_bindings["KEY_LEFT"] = move_left
-        win.key_bindings["KEY_RIGHT"] = move_right
-        win.key_bindings["KEY_BACKSPACE"] = noop
-        win.key_bindings["KEY_RESIZE"] = noop
-        win.key_bindings[ctrlise('x')] = ctrlx
+        basic_setup(win)
 
         def open_file_at_line(x, _):
             win = state.win()
             open_file(win.lines[win.cursor.line])
         
         win.key_bindings["^J"] = open_file_at_line
-
-        win.vars["message"] = ""
-        win.vars["ctrlx"] = False
-        win.vars["ctrlx_answer"] = ""
+ 
         win.vars["block_typing"] = True
 
     def ls_buf():
         state.new_win(list(a.filename for a in state.windows) + ["*ls_buf"], "*ls_buf")
         win = state.win()
-        win.key_bindings["KEY_UP"] = move_up
-        win.key_bindings["KEY_DOWN"] = move_down
-        win.key_bindings["KEY_LEFT"] = move_left
-        win.key_bindings["KEY_RIGHT"] = move_right
-        win.key_bindings["KEY_BACKSPACE"] = noop
-        win.key_bindings["KEY_RESIZE"] = noop
-        win.key_bindings[ctrlise('x')] = ctrlx
+        basic_setup(win)
 
         def open_buf_at_line(state, _):
             prev_head = state.windows_head
@@ -372,9 +441,6 @@ def exec_command(state, cmd):
             state.windows[state.windows_head].lines = list(a.filename for a in state.windows)
         win.key_bindings[ctrlise('k')] = kill_buf_at_line
 
-        win.vars["message"] = ""
-        win.vars["ctrlx"] = False
-        win.vars["ctrlx_answer"] = ""
         win.vars["block_typing"] = True
     lb = ls_buf
 
@@ -382,6 +448,9 @@ def exec_command(state, cmd):
         todos = []
         paths = glob.glob(path + "/**/*", recursive = True)
         for p in paths:
+            import os
+            if os.path.isdir(p):
+                continue
             with open(p, "r") as f:
                 lines = f.read().splitlines()
                 for (idx, l) in enumerate(lines):
@@ -401,13 +470,7 @@ def exec_command(state, cmd):
         todos.sort(key = todo_urgency, reverse = True)
         state.new_win(todos, f"ls_todo(path = {repr(path)})")
         win = state.win()
-        win.key_bindings["KEY_UP"] = move_up
-        win.key_bindings["KEY_DOWN"] = move_down
-        win.key_bindings["KEY_LEFT"] = move_left
-        win.key_bindings["KEY_RIGHT"] = move_right
-        win.key_bindings["KEY_BACKSPACE"] = noop
-        win.key_bindings["KEY_RESIZE"] = noop
-        win.key_bindings[ctrlise('x')] = ctrlx
+        basic_setup(win)
 
         def reload_todos(state, _):
             todos = []
@@ -425,24 +488,9 @@ def exec_command(state, cmd):
 
         win.key_bindings[ctrlise('r')] = reload_todos
 
-        win.vars["message"] = ""
-        win.vars["ctrlx"] = False
-        win.vars["ctrlx_answer"] = ""
         win.vars["block_typing"] = True
-
-        def open_todo_at_line(state, _):
-            win = state.win()
-            line = win.lines[win.cursor.line]
-            path, rest = line.split(":", 1)
-            line_num, rest = rest.split(" | ", 1)
-            open_file(path.strip())
-            init(state)
-            try:
-                state.win().cursor.line = int(line_num)
-                state.win()._line = max(0, int(line_num) - up_padding)
-            except:
-                return "unreachable: bad line number"
-        win.key_bindings['^J'] = open_todo_at_line
+        
+        win.key_bindings['^J'] = open_file_location
 
         def open_todo_at_line_new_win(state, _):
             win = state.win()
@@ -458,6 +506,7 @@ def exec_command(state, cmd):
             except:
                 return "unreachable: bad line number"
         win.key_bindings['^I'] = open_todo_at_line_new_win
+    lt = ls_todo
     
     def next_buf():
         state.windows_head += 1
@@ -476,12 +525,55 @@ def exec_command(state, cmd):
         prev_buf()
     kb = kill_buf
 
+    def run_cmd(cmd):
+        import subprocess
+        result = subprocess.run(cmd.split(), capture_output = True)
+        state.new_win(result.stdout.decode("utf-8").splitlines(), f"run_cmd({repr(cmd)})")
+        init(state)
+        state.win().key_bindings["^J"] = open_file_location
+    
+    def compile():
+        win = state.win()
+        if win.filename.endswith(".py"):
+            run_cmd("python3 " + win.filename)
+        else:
+            c.beep()
+
+    def grep(pattern, path = ".", _only_this_buffer = False):
+        matches = []
+        if not _only_this_buffer:
+            paths = glob.glob(path + "/**/*", recursive = True)
+        else:
+            paths = [state.win().filename]
+        com_pattern = re.compile(pattern)
+        for p in paths:
+            with open(p, "r") as f:
+                for (i, l) in enumerate(f.read().splitlines()):
+                    if not (com_pattern.search(l) is None):
+                        matches.append(f"{p}:{i} | {l.strip()}")
+        state.new_win(matches, f"grep({repr(pattern)}, path = {repr(path)})")
+
+        win = state.win()
+        basic_setup(win)
+        win.key_bindings["^J"] = open_file_location
+
+        win.vars["block_typing"] = True
+
+    def grep_buf(pattern):
+        grep(pattern, _only_this_buffer = True)
+
     try:
         result = eval(cmd)
-        try:
-            result()
-        except:
-            pass
-        win.vars["message"] = str(result)
+        if callable(result):
+            try:
+                try:
+                    res = result()
+                except:
+                    res = result(state)
+                win.vars["message"] = str(res)
+            except Exception as e:
+                win.vars["message"] = str(e)
+        else:
+            win.vars["message"] = str(result)
     except Exception as e:
         win.vars["message"] = str(e)
